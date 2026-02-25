@@ -1,0 +1,42 @@
+以下の会社情報とドキュメント仕様に基づき、リアルな社内資料をMarkdown形式で生成してください。
+
+## 会社プロファイル
+- 会社名: {{ profile.name }}
+- 業種: {{ profile.industry }}
+- 従業員数: {{ profile.employee_count }}名
+- 設立年: {{ profile.founded_year }}年
+- 本社所在地: {{ profile.headquarters }}
+- 事業概要: {{ profile.business_description }}
+- 部署一覧: {{ profile.departments | join(', ') }}
+{% if profile.additional_context %}
+- 追加情報:
+{% for key, value in profile.additional_context.items() %}
+  - {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+
+## ドキュメント仕様
+- タイトル: {{ plan.title }}
+- 種別: {{ plan.doc_type }}
+- 概要: {{ plan.summary }}
+- 対象読者: {{ plan.target_audience }}
+- Mermaid図を含む: {{ "はい" if plan.includes_diagram else "いいえ" }}
+- ボリューム: {{ plan.estimated_length }}
+
+## 生成ルール
+1. 日本語で記述し、実在の会社の社内資料と見分けがつかないレベルのリアルさを目指してください
+2. 日付は2024年〜2026年の範囲で設定してください
+3. 人名が必要な場合は架空の日本人名を使ってください
+4. 見出し構成（#, ##, ###）を適切に使い、読みやすく構造化してください
+{% if plan.includes_diagram %}
+5. 文脈に適したMermaid図を1つ以上含めてください（```mermaid ブロックで記述）
+   - フローチャート (graph TD/LR)、シーケンス図、ガントチャートなど適切なものを選択
+{% endif %}
+{% if plan.estimated_length == "short" %}
+6. ボリューム: 短め（500〜1000文字程度）
+{% elif plan.estimated_length == "medium" %}
+6. ボリューム: 中程度（1000〜2500文字程度）
+{% else %}
+6. ボリューム: 長め（2500〜5000文字程度）
+{% endif %}
+7. YAML frontmatterは含めないでください（後で自動付与されます）

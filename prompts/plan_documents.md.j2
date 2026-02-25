@@ -1,0 +1,29 @@
+以下の会社プロファイルを元に、「{{ domain }}」ドメインで一般的な日本の会社に存在しそうな資料を {{ count }} 件リストアップしてください。
+
+## 会社プロファイル
+- 会社名: {{ profile.name }}
+- 業種: {{ profile.industry }}
+- 従業員数: {{ profile.employee_count }}名
+- 設立年: {{ profile.founded_year }}年
+- 本社所在地: {{ profile.headquarters }}
+- 事業概要: {{ profile.business_description }}
+- 部署一覧: {{ profile.departments | join(', ') }}
+{% if profile.additional_context %}
+- 追加情報:
+{% for key, value in profile.additional_context.items() %}
+  - {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+
+## 指示
+「{{ domain }}」ドメインにおいて、この会社が実際に保有していそうな社内資料を正確に {{ count }} 件考えてください。
+
+各ドキュメントについて以下を指定してください:
+- title: ドキュメントのタイトル（日本語、具体的に）
+- doc_type: 種別（内規, 議事録, 報告書, マニュアル, 企画書, 手順書, 規程, ガイドライン のいずれか）
+- summary: 概要（200字程度で内容を説明）
+- target_audience: 対象読者（例: 全社員, 営業部, 新入社員）
+- includes_diagram: Mermaid形式の図を含むべきか（true/false）
+- estimated_length: ボリューム（short: 1-2ページ相当, medium: 3-5ページ相当, long: 6ページ以上相当）
+
+バリエーションを持たせ、種別や対象読者が偏らないようにしてください。
