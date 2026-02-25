@@ -135,7 +135,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 "role": "assistant",
                 "content": "❌ 会社情報ファイルをアップロードしてください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
             return
 
         config = Config.from_env()
@@ -144,7 +144,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 "role": "assistant",
                 "content": "❌ AZURE_AI_ENDPOINT 環境変数を設定してください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
             return
 
         web_interaction = WebInteraction()
@@ -162,7 +162,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 f"- モード: {mode}"
             ),
         })
-        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
 
         # Runnerを別タスクで実行
         loop = asyncio.get_running_loop()
@@ -194,16 +194,16 @@ def launch_web_ui(port: int = 7860) -> None:
                             web_interaction._question_queue.get(), timeout=0.5
                         )
                         chatbot.append({"role": "assistant", "content": question})
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
                         # ユーザの入力待ち — ここで一旦yieldして戻る
                         return
                     except TimeoutError:
                         # ログの更新をyield
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
                         continue
             except Exception as e:
                 chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
                 return
 
         # Auto モードまたは対話完了後、結果を待つ
@@ -215,7 +215,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 while not web_interaction._notification_queue.empty():
                     note = web_interaction._notification_queue.get_nowait()
                     chatbot.append({"role": "assistant", "content": note})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
             # 最後に残った通知も排出
             while not web_interaction._notification_queue.empty():
                 note = web_interaction._notification_queue.get_nowait()
@@ -223,7 +223,7 @@ def launch_web_ui(port: int = 7860) -> None:
             generated_paths = runner_task.result()
         except Exception as e:
             chatbot.append({"role": "assistant", "content": f"❌ エラーが発生しました: {e}"})
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
             return
 
         # 計画テーブル
@@ -241,6 +241,9 @@ def launch_web_ui(port: int = 7860) -> None:
         # 結果ドキュメント選択肢
         result_choices = [doc.filename for doc in web_interaction._results]
 
+        # 事前にZIPを生成してDownloadButtonにセット
+        zip_path = _build_zip()
+
         chatbot.append({
             "role": "assistant",
             "content": (
@@ -254,6 +257,7 @@ def launch_web_ui(port: int = 7860) -> None:
             gr.update(choices=result_choices, value=result_choices[0] if result_choices else None),
             gr.update(value=_get_result_content(result_choices[0]) if result_choices else ""),
             log_handler.get_text(),
+            gr.update(value=zip_path),
         )
 
     async def handle_user_message(user_message: str, chatbot: list):
@@ -274,10 +278,10 @@ def launch_web_ui(port: int = 7860) -> None:
                             web_interaction._question_queue.get(), timeout=0.5
                         )
                         chatbot.append({"role": "assistant", "content": question})
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
                         return
                     except TimeoutError:
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
                         continue
 
                 # タスク完了
@@ -295,6 +299,10 @@ def launch_web_ui(port: int = 7860) -> None:
                         ])
 
                 result_choices = [doc.filename for doc in web_interaction._results]
+
+                # 事前にZIPを生成してDownloadButtonにセット
+                zip_path = _build_zip()
+
                 chatbot.append({
                     "role": "assistant",
                     "content": f"✅ {len(generated)} 件のドキュメントを生成しました！",
@@ -310,17 +318,18 @@ def launch_web_ui(port: int = 7860) -> None:
                         value=_get_result_content(result_choices[0]) if result_choices else ""
                     ),
                     log_handler.get_text(),
+                    gr.update(value=zip_path),
                 )
 
             except Exception as e:
                 chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
         else:
             chatbot.append({
                 "role": "assistant",
                 "content": "「開始」ボタンを押して生成を開始してください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
 
     def _get_result_content(filename: str | None) -> str:
         """ファイル名から生成結果の内容を返す"""
@@ -335,10 +344,10 @@ def launch_web_ui(port: int = 7860) -> None:
         """結果ドキュメント選択時のコールバック"""
         return _get_result_content(filename)
 
-    def download_all():
-        """全ドキュメントをZIPでダウンロード"""
+    def _build_zip() -> str | None:
+        """全ドキュメントをZIPにまとめてパスを返す"""
         if not web_interaction or not web_interaction._results:
-            return gr.update(value=None)
+            return None
 
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -447,24 +456,19 @@ def launch_web_ui(port: int = 7860) -> None:
         start_btn.click(
             fn=start_generation,
             inputs=[file_input, domain_input, count_input, mode_input, chatbot],
-            outputs=[chatbot, plan_table, result_selector, result_preview, log_output],
+            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn],
         )
 
         msg_input.submit(
             fn=handle_user_message,
             inputs=[msg_input, chatbot],
-            outputs=[chatbot, plan_table, result_selector, result_preview, log_output],
+            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn],
         ).then(fn=lambda: "", outputs=[msg_input])
 
         result_selector.change(
             fn=on_result_select,
             inputs=[result_selector],
             outputs=[result_preview],
-        )
-
-        dl_btn.click(
-            fn=download_all,
-            outputs=[dl_btn],
         )
 
     app.queue()
