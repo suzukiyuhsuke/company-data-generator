@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 import zipfile
 from datetime import timedelta, timezone
@@ -420,7 +421,7 @@ def launch_web_ui(port: int = 7860) -> None:
         title="会社データジェネレータ",
     ) as app:
         gr.Markdown("# 🏢 会社データジェネレータ")
-        gr.Markdown("架空の日本企業の社内データ（内規・議事録・報告書など）を生成します。")
+        gr.Markdown("架空の日本企業の社内データ（内規・議事録・報告書など）を生成します。Markdown形式で記述した会社情報をアップロードすると、AIがそれなりに解釈して指定したドメインで「存在しそうな」ドキュメントを生成します。")
 
         with gr.Tabs():
             # タブ1: 設定 & 対話
@@ -436,6 +437,7 @@ def launch_web_ui(port: int = 7860) -> None:
                             choices=DOMAIN_CHOICES,
                             label="ドメイン",
                             value="営業",
+                            info="生成するドキュメントの業務領域を選択します",
                         )
                         count_input = gr.Number(
                             minimum=1,
@@ -449,6 +451,7 @@ def launch_web_ui(port: int = 7860) -> None:
                             choices=["interactive", "auto"],
                             value="interactive",
                             label="モード",
+                            info="interactive: 対話しながら生成内容を調整 / auto: 自動で一括生成",
                         )
                         start_btn = gr.Button("🚀 生成開始", variant="primary")
 
@@ -519,4 +522,17 @@ def launch_web_ui(port: int = 7860) -> None:
         )
 
     app.queue()
-    app.launch(server_port=port, share=False, theme=gr.themes.Soft())
+
+    # 環境変数 APP_USERNAME / APP_PASSWORD が設定されていれば認証を有効化
+    auth_user = os.environ.get("APP_USERNAME")
+    auth_pass = os.environ.get("APP_PASSWORD")
+    auth = (auth_user, auth_pass) if auth_user and auth_pass else None
+
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+        auth=auth,
+        auth_message="ログインしてください" if auth else None,
+        theme=gr.themes.Soft(),
+    )
