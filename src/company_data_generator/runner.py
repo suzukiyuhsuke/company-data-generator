@@ -14,7 +14,7 @@ from company_data_generator.agents.info_collector import InfoCollectorAgent
 from company_data_generator.config import Config
 from company_data_generator.interaction import UserInteraction
 from company_data_generator.llm_client import LLMClient
-from company_data_generator.models import DocumentPlan, GeneratedDocument
+from company_data_generator.models import DocumentPlan, GeneratedDocument, PhaseTokenUsage
 from company_data_generator.prompt_store import PromptStore
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,12 @@ class Runner:
         self.doc_generator = DocGeneratorAgent(llm_client, prompt_store)
         self._llm_client = llm_client
         self._credential = credential
+        self._phase_usage = PhaseTokenUsage()
+
+    @property
+    def phase_usage(self) -> PhaseTokenUsage:
+        """フェーズ別トークン使用量"""
+        return self._phase_usage
 
     async def run(
         self,
@@ -72,9 +78,11 @@ class Runner:
                 "📄 アップロードされた会社情報を読み込んでいます。\n"
                 "不足している情報がないかチェックしますね。"
             )
+            self._llm_client.reset_usage()
             profile = await self.info_collector.run(
                 company_file, domain, mode, self.interaction
             )
+            self._phase_usage.phase1 = self._llm_client.get_usage()
 
             # プロファイルを保存
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,7 +102,9 @@ class Runner:
                 f"「{domain}」ドメインで生成するドキュメント {count} 件の計画を立てています。\n"
                 f"どんな文書が必要か考えていますので、少々お待ちください 🤔"
             )
+            self._llm_client.reset_usage()
             plan = await self.doc_planner.run(profile, domain, count)
+            self._phase_usage.phase2 = self._llm_client.get_usage()
             await self.interaction.display_plan(plan)
             await self.interaction.notify(
                 f"{len(plan.plans)} 件のドキュメント計画ができました！\n"
@@ -117,6 +127,7 @@ class Runner:
                 f"{len(plan.plans)} 件のドキュメントを一気に書いていきます！\n"
                 f"{self.config.max_concurrency} 件ずつ並列で作業するので、しばらくお待ちください ⏳"
             )
+            self._llm_client.reset_usage()
             sem = asyncio.Semaphore(self.config.max_concurrency)
             completed_count = 0
             total = len(plan.plans)
@@ -152,6 +163,9 @@ class Runner:
                     path = self._save_document(doc, output_dir)
                     await self.interaction.display_result(doc)
                     generated.append(path)
+
+            self._phase_usage.phase3 = self._llm_client.get_usage()
+            self._phase_usage.phase3_doc_count = len(generated)
 
             if failed_count:
                 logger.warning(

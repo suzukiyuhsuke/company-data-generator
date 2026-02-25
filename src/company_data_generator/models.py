@@ -57,3 +57,29 @@ class AutoCompletedProfile(BaseModel):
 
     profile: CompanyProfile = Field(description="補完された会社プロファイル")
     assumptions: list[str] = Field(description="補完時に設定した前提条件のリスト")
+
+
+class TokenUsage(BaseModel):
+    """LLM トークン使用量"""
+
+    prompt_tokens: int = Field(default=0, description="入力トークン数")
+    completion_tokens: int = Field(default=0, description="出力トークン数")
+
+    @property
+    def total_tokens(self) -> int:
+        """合計トークン数"""
+        return self.prompt_tokens + self.completion_tokens
+
+    def __iadd__(self, other: TokenUsage) -> TokenUsage:  # noqa: PYI034
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        return self
+
+
+class PhaseTokenUsage(BaseModel):
+    """フェーズ別トークン使用量"""
+
+    phase1: TokenUsage = Field(default_factory=TokenUsage, description="Phase1 使用量")
+    phase2: TokenUsage = Field(default_factory=TokenUsage, description="Phase2 使用量")
+    phase3: TokenUsage = Field(default_factory=TokenUsage, description="Phase3 使用量")
+    phase3_doc_count: int = Field(default=0, description="Phase3 で生成したドキュメント数")

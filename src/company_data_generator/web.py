@@ -13,7 +13,7 @@ import gradio as gr
 
 from company_data_generator.config import Config
 from company_data_generator.interaction import UserInteraction
-from company_data_generator.models import DocumentPlanList, GeneratedDocument
+from company_data_generator.models import DocumentPlanList, GeneratedDocument, PhaseTokenUsage
 from company_data_generator.runner import Runner
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ class WebInteraction(UserInteraction):
         self._progress_current: int = 0
         self._progress_total: int = 0
         self._progress_message: str = ""
+        self._phase_usage: PhaseTokenUsage = PhaseTokenUsage()
 
     async def ask(self, question: str, choices: list[str] | None = None) -> str:
         """質問をチャットUIに送り、ユーザの回答を待つ"""
@@ -105,6 +106,7 @@ def launch_web_ui(port: int = 7860) -> None:
 
     web_interaction: WebInteraction | None = None
     runner_task: asyncio.Task | None = None
+    runner_ref: Runner | None = None
     generated_paths: list[Path] = []
     log_handler = _WebLogHandler()
 
@@ -118,6 +120,28 @@ def launch_web_ui(port: int = 7860) -> None:
     for name in ("azure", "azure.core", "azure.identity"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
+    def _format_token_usage(pu: PhaseTokenUsage) -> str:
+        """PhaseTokenUsage をMarkdownテーブルにフォーマットする"""
+        avg = ""
+        if pu.phase3_doc_count > 0:
+            avg_total = pu.phase3.total_tokens // pu.phase3_doc_count
+            avg = f"\n\n**Phase 3 ドキュメントあたり平均: {avg_total:,} tokens** ({pu.phase3_doc_count} 件)"
+        return (
+            "| Phase | 入力トークン | 出力トークン | 合計 |\n"
+            "|-------|----------:|----------:|-----:|\n"
+            f"| Phase 1 (情報収集) | {pu.phase1.prompt_tokens:,} | {pu.phase1.completion_tokens:,} | {pu.phase1.total_tokens:,} |\n"
+            f"| Phase 2 (計画作成) | {pu.phase2.prompt_tokens:,} | {pu.phase2.completion_tokens:,} | {pu.phase2.total_tokens:,} |\n"
+            f"| Phase 3 (文書生成) | {pu.phase3.prompt_tokens:,} | {pu.phase3.completion_tokens:,} | {pu.phase3.total_tokens:,} |\n"
+            f"| **合計** | **{pu.phase1.prompt_tokens + pu.phase2.prompt_tokens + pu.phase3.prompt_tokens:,}** "
+            f"| **{pu.phase1.completion_tokens + pu.phase2.completion_tokens + pu.phase3.completion_tokens:,}** "
+            f"| **{pu.phase1.total_tokens + pu.phase2.total_tokens + pu.phase3.total_tokens:,}** |"
+            f"{avg}"
+        )
+
+    # 7-tuple ヘルパー: 通常の yield 用（トークン使用量は更新しない）
+    def _yield_update(chatbot, log_text):
+        return chatbot, gr.update(), gr.update(), gr.update(), log_text, gr.update(), gr.update()
+
     async def start_generation(
         company_file: str | None,
         domain: str,
@@ -126,7 +150,7 @@ def launch_web_ui(port: int = 7860) -> None:
         chatbot: list,
     ):
         """生成プロセスを開始し、チャット対話を管理する"""
-        nonlocal web_interaction, runner_task, generated_paths
+        nonlocal web_interaction, runner_task, generated_paths, runner_ref
 
         log_handler.clear()
 
@@ -135,7 +159,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 "role": "assistant",
                 "content": "❌ 会社情報ファイルをアップロードしてください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+            yield _yield_update(chatbot, log_handler.get_text())
             return
 
         config = Config.from_env()
@@ -144,11 +168,12 @@ def launch_web_ui(port: int = 7860) -> None:
                 "role": "assistant",
                 "content": "❌ AZURE_AI_ENDPOINT 環境変数を設定してください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+            yield _yield_update(chatbot, log_handler.get_text())
             return
 
         web_interaction = WebInteraction()
         runner = Runner(interaction=web_interaction, config=config)
+        runner_ref = runner
 
         company_path = Path(company_file)
         output_dir = Path(tempfile.mkdtemp(prefix="cdg_"))
@@ -162,7 +187,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 f"- モード: {mode}"
             ),
         })
-        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+        yield _yield_update(chatbot, log_handler.get_text())
 
         # Runnerを別タスクで実行
         loop = asyncio.get_running_loop()
@@ -194,16 +219,16 @@ def launch_web_ui(port: int = 7860) -> None:
                             web_interaction._question_queue.get(), timeout=0.5
                         )
                         chatbot.append({"role": "assistant", "content": question})
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                        yield _yield_update(chatbot, log_handler.get_text())
                         # ユーザの入力待ち — ここで一旦yieldして戻る
                         return
                     except TimeoutError:
                         # ログの更新をyield
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                        yield _yield_update(chatbot, log_handler.get_text())
                         continue
             except Exception as e:
                 chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                yield _yield_update(chatbot, log_handler.get_text())
                 return
 
         # Auto モードまたは対話完了後、結果を待つ
@@ -215,7 +240,7 @@ def launch_web_ui(port: int = 7860) -> None:
                 while not web_interaction._notification_queue.empty():
                     note = web_interaction._notification_queue.get_nowait()
                     chatbot.append({"role": "assistant", "content": note})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                yield _yield_update(chatbot, log_handler.get_text())
             # 最後に残った通知も排出
             while not web_interaction._notification_queue.empty():
                 note = web_interaction._notification_queue.get_nowait()
@@ -223,8 +248,11 @@ def launch_web_ui(port: int = 7860) -> None:
             generated_paths = runner_task.result()
         except Exception as e:
             chatbot.append({"role": "assistant", "content": f"❌ エラーが発生しました: {e}"})
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+            yield _yield_update(chatbot, log_handler.get_text())
             return
+
+        # トークン使用量を保存
+        web_interaction._phase_usage = runner.phase_usage
 
         # 計画テーブル
         plan_data = []
@@ -244,6 +272,9 @@ def launch_web_ui(port: int = 7860) -> None:
         # 事前にZIPを生成してDownloadButtonにセット
         zip_path = _build_zip()
 
+        # トークン使用量テキスト
+        token_text = _format_token_usage(web_interaction._phase_usage)
+
         chatbot.append({
             "role": "assistant",
             "content": (
@@ -258,11 +289,12 @@ def launch_web_ui(port: int = 7860) -> None:
             gr.update(value=_get_result_content(result_choices[0]) if result_choices else ""),
             log_handler.get_text(),
             gr.update(value=zip_path),
+            gr.update(value=token_text),
         )
 
     async def handle_user_message(user_message: str, chatbot: list):
         """ユーザメッセージを処理する"""
-        nonlocal web_interaction, runner_task
+        nonlocal web_interaction, runner_task, runner_ref
 
         chatbot.append({"role": "user", "content": user_message})
 
@@ -278,14 +310,18 @@ def launch_web_ui(port: int = 7860) -> None:
                             web_interaction._question_queue.get(), timeout=0.5
                         )
                         chatbot.append({"role": "assistant", "content": question})
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                        yield _yield_update(chatbot, log_handler.get_text())
                         return
                     except TimeoutError:
-                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                        yield _yield_update(chatbot, log_handler.get_text())
                         continue
 
                 # タスク完了
                 generated = runner_task.result()
+
+                # トークン使用量を保存
+                if runner_ref:
+                    web_interaction._phase_usage = runner_ref.phase_usage
 
                 plan_data = []
                 if web_interaction._plan:
@@ -303,6 +339,9 @@ def launch_web_ui(port: int = 7860) -> None:
                 # 事前にZIPを生成してDownloadButtonにセット
                 zip_path = _build_zip()
 
+                # トークン使用量テキスト
+                token_text = _format_token_usage(web_interaction._phase_usage)
+
                 chatbot.append({
                     "role": "assistant",
                     "content": f"✅ {len(generated)} 件のドキュメントを生成しました！",
@@ -319,17 +358,18 @@ def launch_web_ui(port: int = 7860) -> None:
                     ),
                     log_handler.get_text(),
                     gr.update(value=zip_path),
+                    gr.update(value=token_text),
                 )
 
             except Exception as e:
                 chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+                yield _yield_update(chatbot, log_handler.get_text())
         else:
             chatbot.append({
                 "role": "assistant",
                 "content": "「開始」ボタンを押して生成を開始してください。",
             })
-            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text(), gr.update()
+            yield _yield_update(chatbot, log_handler.get_text())
 
     def _get_result_content(filename: str | None) -> str:
         """ファイル名から生成結果の内容を返す"""
@@ -443,6 +483,13 @@ def launch_web_ui(port: int = 7860) -> None:
                     dl_btn = gr.DownloadButton("📦 一括ダウンロード（ZIP）", variant="secondary")
                 result_preview = gr.Markdown(label="プレビュー")
 
+            # タブ4: トークン使用量
+            with gr.Tab("④ トークン使用量"):
+                token_usage_output = gr.Markdown(
+                    value="生成完了後にフェーズ別のトークン使用量が表示されます。",
+                    label="トークン使用量",
+                )
+
         # ログ表示（タブグループの外）
         with gr.Accordion("📋 ログ", open=False):
             log_output = gr.Textbox(
@@ -456,13 +503,13 @@ def launch_web_ui(port: int = 7860) -> None:
         start_btn.click(
             fn=start_generation,
             inputs=[file_input, domain_input, count_input, mode_input, chatbot],
-            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn],
+            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn, token_usage_output],
         )
 
         msg_input.submit(
             fn=handle_user_message,
             inputs=[msg_input, chatbot],
-            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn],
+            outputs=[chatbot, plan_table, result_selector, result_preview, log_output, dl_btn, token_usage_output],
         ).then(fn=lambda: "", outputs=[msg_input])
 
         result_selector.change(

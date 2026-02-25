@@ -7,6 +7,8 @@ from company_data_generator.models import (
     DocumentPlanList,
     GeneratedDocument,
     MissingInfo,
+    PhaseTokenUsage,
+    TokenUsage,
 )
 
 
@@ -52,3 +54,43 @@ class TestAutoCompletedProfile:
         )
         assert auto.profile.name == "株式会社テスト商事"
         assert len(auto.assumptions) == 1
+
+
+class TestTokenUsage:
+    def test_defaults(self) -> None:
+        usage = TokenUsage()
+        assert usage.prompt_tokens == 0
+        assert usage.completion_tokens == 0
+        assert usage.total_tokens == 0
+
+    def test_total(self) -> None:
+        usage = TokenUsage(prompt_tokens=100, completion_tokens=50)
+        assert usage.total_tokens == 150
+
+    def test_iadd(self) -> None:
+        a = TokenUsage(prompt_tokens=10, completion_tokens=20)
+        b = TokenUsage(prompt_tokens=30, completion_tokens=40)
+        a += b
+        assert a.prompt_tokens == 40
+        assert a.completion_tokens == 60
+        assert a.total_tokens == 100
+
+
+class TestPhaseTokenUsage:
+    def test_defaults(self) -> None:
+        pu = PhaseTokenUsage()
+        assert pu.phase1.total_tokens == 0
+        assert pu.phase2.total_tokens == 0
+        assert pu.phase3.total_tokens == 0
+        assert pu.phase3_doc_count == 0
+
+    def test_set_phases(self) -> None:
+        pu = PhaseTokenUsage(
+            phase1=TokenUsage(prompt_tokens=100, completion_tokens=50),
+            phase2=TokenUsage(prompt_tokens=200, completion_tokens=100),
+            phase3=TokenUsage(prompt_tokens=1000, completion_tokens=500),
+            phase3_doc_count=5,
+        )
+        assert pu.phase1.total_tokens == 150
+        assert pu.phase2.total_tokens == 300
+        assert pu.phase3.total_tokens == 1500

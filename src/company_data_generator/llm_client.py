@@ -15,6 +15,8 @@ from azure.ai.inference.models import (
 )
 from azure.core.exceptions import HttpResponseError
 
+from company_data_generator.models import TokenUsage
+
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
     from pydantic import BaseModel
@@ -76,6 +78,7 @@ class LLMClient:
         self.endpoint = endpoint
         self.credential = credential
         self._client: ChatCompletionsClient | None = None
+        self._usage = TokenUsage()
 
     def _get_client(self) -> ChatCompletionsClient:
         """クライアントを取得（遅延初期化）"""
@@ -240,6 +243,10 @@ class LLMClient:
 
             usage = response.usage
             if usage:
+                self._usage += TokenUsage(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                )
                 logger.info(
                     "LLMレスポンス受信 [prompt=%d tokens, completion=%d tokens]",
                     usage.prompt_tokens,
@@ -269,6 +276,14 @@ class LLMClient:
 
         # ここには到達しないはず
         raise RuntimeError("リトライ上限に達しました")
+
+    def get_usage(self) -> TokenUsage:
+        """累積トークン使用量を取得する"""
+        return self._usage.model_copy()
+
+    def reset_usage(self) -> None:
+        """累積トークン使用量をリセットする"""
+        self._usage = TokenUsage()
 
     async def close(self) -> None:
         """クライアントをクローズする"""
