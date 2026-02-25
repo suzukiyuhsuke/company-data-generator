@@ -100,283 +100,273 @@ class WebInteraction(UserInteraction):
         await self._notification_queue.put(message)
 
 
-class _AppState:
-    """ホットリロードをまたいで保持する可変状態"""
+def launch_web_ui(port: int = 7860) -> None:
+    """Gradio WebUIを起動する"""
 
-    def __init__(self) -> None:
-        self.web_interaction: WebInteraction | None = None
-        self.runner_task: asyncio.Task | None = None
-        self.generated_paths: list[Path] = []
-        self.log_handler = _WebLogHandler()
+    web_interaction: WebInteraction | None = None
+    runner_task: asyncio.Task | None = None
+    generated_paths: list[Path] = []
+    log_handler = _WebLogHandler()
 
-        # アプリロガーにWebハンドラを追加（Azure SDK は除外済み）
-        app_logger = logging.getLogger("company_data_generator")
-        app_logger.addHandler(self.log_handler)
-        if app_logger.level == logging.NOTSET:
-            app_logger.setLevel(logging.INFO)
+    # アプリロガーにWebハンドラを追加（Azure SDK は除外済み）
+    app_logger = logging.getLogger("company_data_generator")
+    app_logger.addHandler(log_handler)
+    if app_logger.level == logging.NOTSET:
+        app_logger.setLevel(logging.INFO)
 
-        # Azure SDK ロガーを抑制
-        for name in ("azure", "azure.core", "azure.identity"):
-            logging.getLogger(name).setLevel(logging.WARNING)
+    # Azure SDK ロガーを抑制
+    for name in ("azure", "azure.core", "azure.identity"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
+    async def start_generation(
+        company_file: str | None,
+        domain: str,
+        count: int,
+        mode: str,
+        chatbot: list,
+    ):
+        """生成プロセスを開始し、チャット対話を管理する"""
+        nonlocal web_interaction, runner_task, generated_paths
 
-# --- ホットリロード時に再実行されないブロック ---
-if gr.NO_RELOAD:
-    _state = _AppState()
+        log_handler.clear()
 
-
-async def _start_generation(
-    company_file: str | None,
-    domain: str,
-    count: int,
-    mode: str,
-    chatbot: list,
-):
-    """生成プロセスを開始し、チャット対話を管理する"""
-    _state.log_handler.clear()
-
-    if not company_file:
-        chatbot.append({
-            "role": "assistant",
-            "content": "❌ 会社情報ファイルをアップロードしてください。",
-        })
-        yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-        return
-
-    config = Config.from_env()
-    if not config.azure_endpoint:
-        chatbot.append({
-            "role": "assistant",
-            "content": "❌ AZURE_AI_ENDPOINT 環境変数を設定してください。",
-        })
-        yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-        return
-
-    _state.web_interaction = WebInteraction()
-    runner = Runner(interaction=_state.web_interaction, config=config)
-
-    company_path = Path(company_file)
-    output_dir = Path(tempfile.mkdtemp(prefix="cdg_"))
-
-    chatbot.append({
-        "role": "assistant",
-        "content": (
-            f"🏢 生成を開始します\n"
-            f"- ドメイン: {domain}\n"
-            f"- 件数: {count}\n"
-            f"- モード: {mode}"
-        ),
-    })
-    yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-
-    # Runnerを別タスクで実行
-    loop = asyncio.get_running_loop()
-    _state.runner_task = loop.create_task(
-        runner.run(
-            company_file=company_path,
-            domain=domain,
-            count=int(count),
-            mode=mode,
-            output_dir=output_dir,
-        )
-    )
-
-    def _on_task_error(task: asyncio.Task) -> None:
-        """runner_task の例外をログに記録する"""
-        if task.cancelled():
-            logger.warning("生成タスクがキャンセルされました")
-        elif task.exception():
-            logger.error("生成タスクでエラー: %s", task.exception())
-
-    _state.runner_task.add_done_callback(_on_task_error)
-
-    # Interactive モードの場合、対話ループ
-    if mode == "interactive":
-        try:
-            while not _state.runner_task.done():
-                try:
-                    question = await asyncio.wait_for(
-                        _state.web_interaction._question_queue.get(), timeout=0.5
-                    )
-                    chatbot.append({"role": "assistant", "content": question})
-                    yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-                    # ユーザの入力待ち — ここで一旦yieldして戻る
-                    return
-                except TimeoutError:
-                    # ログの更新をyield
-                    yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-                    continue
-        except Exception as e:
-            chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-            yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-            return
-
-    # Auto モードまたは対話完了後、結果を待つ
-    try:
-        # ポーリングしながらログ・通知を更新
-        while not _state.runner_task.done():
-            await asyncio.sleep(0.5)
-            # 通知キューを排出してチャットに表示
-            while not _state.web_interaction._notification_queue.empty():
-                note = _state.web_interaction._notification_queue.get_nowait()
-                chatbot.append({"role": "assistant", "content": note})
-            yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-        # 最後に残った通知も排出
-        while not _state.web_interaction._notification_queue.empty():
-            note = _state.web_interaction._notification_queue.get_nowait()
-            chatbot.append({"role": "assistant", "content": note})
-        _state.generated_paths = _state.runner_task.result()
-    except Exception as e:
-        chatbot.append({"role": "assistant", "content": f"❌ エラーが発生しました: {e}"})
-        yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-        return
-
-    # 計画テーブル
-    plan_data = []
-    if _state.web_interaction._plan:
-        for p in _state.web_interaction._plan.plans:
-            plan_data.append([
-                p.title,
-                p.doc_type,
-                p.summary[:60],
-                "✓" if p.includes_diagram else "",
-                p.estimated_length,
-            ])
-
-    # 結果ドキュメント選択肢
-    result_choices = [doc.filename for doc in _state.web_interaction._results]
-
-    chatbot.append({
-        "role": "assistant",
-        "content": (
-            f"✅ {len(_state.generated_paths)} 件のドキュメントを生成しました！\n"
-            "「計画」タブと「結果」タブで確認できます。"
-        ),
-    })
-    yield (
-        chatbot,
-        gr.update(value=plan_data if plan_data else None),
-        gr.update(choices=result_choices, value=result_choices[0] if result_choices else None),
-        gr.update(value=_get_result_content(result_choices[0]) if result_choices else ""),
-        _state.log_handler.get_text(),
-    )
-
-
-async def _handle_user_message(user_message: str, chatbot: list):
-    """ユーザメッセージを処理する"""
-    chatbot.append({"role": "user", "content": user_message})
-
-    if _state.web_interaction and not _state.runner_task.done():
-        # エージェントに回答を送信
-        await _state.web_interaction._answer_queue.put(user_message)
-
-        # 次の質問またはタスク完了を待つ
-        try:
-            while not _state.runner_task.done():
-                try:
-                    question = await asyncio.wait_for(
-                        _state.web_interaction._question_queue.get(), timeout=0.5
-                    )
-                    chatbot.append({"role": "assistant", "content": question})
-                    yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-                    return
-                except TimeoutError:
-                    yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-                    continue
-
-            # タスク完了
-            generated = _state.runner_task.result()
-
-            plan_data = []
-            if _state.web_interaction._plan:
-                for p in _state.web_interaction._plan.plans:
-                    plan_data.append([
-                        p.title,
-                        p.doc_type,
-                        p.summary[:60],
-                        "✓" if p.includes_diagram else "",
-                        p.estimated_length,
-                    ])
-
-            result_choices = [doc.filename for doc in _state.web_interaction._results]
+        if not company_file:
             chatbot.append({
                 "role": "assistant",
-                "content": f"✅ {len(generated)} 件のドキュメントを生成しました！",
+                "content": "❌ 会社情報ファイルをアップロードしてください。",
             })
-            yield (
-                chatbot,
-                gr.update(value=plan_data if plan_data else None),
-                gr.update(
-                    choices=result_choices,
-                    value=result_choices[0] if result_choices else None,
-                ),
-                gr.update(
-                    value=_get_result_content(result_choices[0]) if result_choices else ""
-                ),
-                _state.log_handler.get_text(),
-            )
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            return
 
-        except Exception as e:
-            chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
-            yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
-    else:
+        config = Config.from_env()
+        if not config.azure_endpoint:
+            chatbot.append({
+                "role": "assistant",
+                "content": "❌ AZURE_AI_ENDPOINT 環境変数を設定してください。",
+            })
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            return
+
+        web_interaction = WebInteraction()
+        runner = Runner(interaction=web_interaction, config=config)
+
+        company_path = Path(company_file)
+        output_dir = Path(tempfile.mkdtemp(prefix="cdg_"))
+
         chatbot.append({
             "role": "assistant",
-            "content": "「開始」ボタンを押して生成を開始してください。",
+            "content": (
+                f"🏢 生成を開始します\n"
+                f"- ドメイン: {domain}\n"
+                f"- 件数: {count}\n"
+                f"- モード: {mode}"
+            ),
         })
-        yield chatbot, gr.update(), gr.update(), gr.update(), _state.log_handler.get_text()
+        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
 
+        # Runnerを別タスクで実行
+        loop = asyncio.get_running_loop()
+        runner_task = loop.create_task(
+            runner.run(
+                company_file=company_path,
+                domain=domain,
+                count=int(count),
+                mode=mode,
+                output_dir=output_dir,
+            )
+        )
 
-def _get_result_content(filename: str | None) -> str:
-    """ファイル名から生成結果の内容を返す"""
-    if not filename or not _state.web_interaction:
-        return ""
-    for doc in _state.web_interaction._results:
-        if doc.filename == filename:
-            return doc.content
-    return ""
+        def _on_task_error(task: asyncio.Task) -> None:
+            """runner_task の例外をログに記録する"""
+            if task.cancelled():
+                logger.warning("生成タスクがキャンセルされました")
+            elif task.exception():
+                logger.error("生成タスクでエラー: %s", task.exception())
 
+        runner_task.add_done_callback(_on_task_error)
 
-def _on_result_select(filename: str | None) -> str:
-    """結果ドキュメント選択時のコールバック"""
-    return _get_result_content(filename)
+        # Interactive モードの場合、対話ループ
+        if mode == "interactive":
+            try:
+                while not runner_task.done():
+                    try:
+                        question = await asyncio.wait_for(
+                            web_interaction._question_queue.get(), timeout=0.5
+                        )
+                        chatbot.append({"role": "assistant", "content": question})
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        # ユーザの入力待ち — ここで一旦yieldして戻る
+                        return
+                    except TimeoutError:
+                        # ログの更新をyield
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        continue
+            except Exception as e:
+                chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                return
 
+        # Auto モードまたは対話完了後、結果を待つ
+        try:
+            # ポーリングしながらログ・通知を更新
+            while not runner_task.done():
+                await asyncio.sleep(0.5)
+                # 通知キューを排出してチャットに表示
+                while not web_interaction._notification_queue.empty():
+                    note = web_interaction._notification_queue.get_nowait()
+                    chatbot.append({"role": "assistant", "content": note})
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            # 最後に残った通知も排出
+            while not web_interaction._notification_queue.empty():
+                note = web_interaction._notification_queue.get_nowait()
+                chatbot.append({"role": "assistant", "content": note})
+            generated_paths = runner_task.result()
+        except Exception as e:
+            chatbot.append({"role": "assistant", "content": f"❌ エラーが発生しました: {e}"})
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+            return
 
-def _download_all():
-    """全ドキュメントをZIPでダウンロード"""
-    if not _state.web_interaction or not _state.web_interaction._results:
-        return gr.update(value=None)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
-        for doc in _state.web_interaction._results:
-            zf.writestr(doc.filename, doc.content)
-
-        # ドキュメント計画をCSVで同梱
-        if _state.web_interaction._plan:
-            import csv
-            import io
-
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(["タイトル", "種別", "概要", "対象読者", "図", "ボリューム"])
-            for p in _state.web_interaction._plan.plans:
-                writer.writerow([
+        # 計画テーブル
+        plan_data = []
+        if web_interaction._plan:
+            for p in web_interaction._plan.plans:
+                plan_data.append([
                     p.title,
                     p.doc_type,
-                    p.summary,
-                    p.target_audience,
-                    "あり" if p.includes_diagram else "なし",
+                    p.summary[:60],
+                    "✓" if p.includes_diagram else "",
                     p.estimated_length,
                 ])
-            zf.writestr("document_plan.csv", buf.getvalue())
 
-    return tmp.name
+        # 結果ドキュメント選択肢
+        result_choices = [doc.filename for doc in web_interaction._results]
 
+        chatbot.append({
+            "role": "assistant",
+            "content": (
+                f"✅ {len(generated_paths)} 件のドキュメントを生成しました！\n"
+                "「計画」タブと「結果」タブで確認できます。"
+            ),
+        })
+        yield (
+            chatbot,
+            gr.update(value=plan_data if plan_data else None),
+            gr.update(choices=result_choices, value=result_choices[0] if result_choices else None),
+            gr.update(value=_get_result_content(result_choices[0]) if result_choices else ""),
+            log_handler.get_text(),
+        )
 
-# --- UI構築 ---
-def build_app() -> gr.Blocks:
-    """Gradio UIを構築して返す"""
+    async def handle_user_message(user_message: str, chatbot: list):
+        """ユーザメッセージを処理する"""
+        nonlocal web_interaction, runner_task
+
+        chatbot.append({"role": "user", "content": user_message})
+
+        if web_interaction and not runner_task.done():
+            # エージェントに回答を送信
+            await web_interaction._answer_queue.put(user_message)
+
+            # 次の質問またはタスク完了を待つ
+            try:
+                while not runner_task.done():
+                    try:
+                        question = await asyncio.wait_for(
+                            web_interaction._question_queue.get(), timeout=0.5
+                        )
+                        chatbot.append({"role": "assistant", "content": question})
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        return
+                    except TimeoutError:
+                        yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+                        continue
+
+                # タスク完了
+                generated = runner_task.result()
+
+                plan_data = []
+                if web_interaction._plan:
+                    for p in web_interaction._plan.plans:
+                        plan_data.append([
+                            p.title,
+                            p.doc_type,
+                            p.summary[:60],
+                            "✓" if p.includes_diagram else "",
+                            p.estimated_length,
+                        ])
+
+                result_choices = [doc.filename for doc in web_interaction._results]
+                chatbot.append({
+                    "role": "assistant",
+                    "content": f"✅ {len(generated)} 件のドキュメントを生成しました！",
+                })
+                yield (
+                    chatbot,
+                    gr.update(value=plan_data if plan_data else None),
+                    gr.update(
+                        choices=result_choices,
+                        value=result_choices[0] if result_choices else None,
+                    ),
+                    gr.update(
+                        value=_get_result_content(result_choices[0]) if result_choices else ""
+                    ),
+                    log_handler.get_text(),
+                )
+
+            except Exception as e:
+                chatbot.append({"role": "assistant", "content": f"❌ エラー: {e}"})
+                yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+        else:
+            chatbot.append({
+                "role": "assistant",
+                "content": "「開始」ボタンを押して生成を開始してください。",
+            })
+            yield chatbot, gr.update(), gr.update(), gr.update(), log_handler.get_text()
+
+    def _get_result_content(filename: str | None) -> str:
+        """ファイル名から生成結果の内容を返す"""
+        if not filename or not web_interaction:
+            return ""
+        for doc in web_interaction._results:
+            if doc.filename == filename:
+                return doc.content
+        return ""
+
+    def on_result_select(filename: str | None) -> str:
+        """結果ドキュメント選択時のコールバック"""
+        return _get_result_content(filename)
+
+    def download_all():
+        """全ドキュメントをZIPでダウンロード"""
+        if not web_interaction or not web_interaction._results:
+            return gr.update(value=None)
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for doc in web_interaction._results:
+                zf.writestr(doc.filename, doc.content)
+
+            # ドキュメント計画をCSVで同梱
+            if web_interaction._plan:
+                import csv
+                import io
+
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(["タイトル", "種別", "概要", "対象読者", "図", "ボリューム"])
+                for p in web_interaction._plan.plans:
+                    writer.writerow([
+                        p.title,
+                        p.doc_type,
+                        p.summary,
+                        p.target_audience,
+                        "あり" if p.includes_diagram else "なし",
+                        p.estimated_length,
+                    ])
+                zf.writestr("document_plan.csv", buf.getvalue())
+
+        return tmp.name
+
+    # --- UI構築 ---
     with gr.Blocks(
         title="会社データジェネレータ",
     ) as app:
@@ -417,6 +407,7 @@ def build_app() -> gr.Blocks:
                         chatbot = gr.Chatbot(
                             label="対話",
                             height=750,
+                            group_consecutive_messages=False,
                         )
                         msg_input = gr.Textbox(
                             label="メッセージ入力",
@@ -454,36 +445,27 @@ def build_app() -> gr.Blocks:
 
         # イベントバインド
         start_btn.click(
-            fn=_start_generation,
+            fn=start_generation,
             inputs=[file_input, domain_input, count_input, mode_input, chatbot],
             outputs=[chatbot, plan_table, result_selector, result_preview, log_output],
         )
 
         msg_input.submit(
-            fn=_handle_user_message,
+            fn=handle_user_message,
             inputs=[msg_input, chatbot],
             outputs=[chatbot, plan_table, result_selector, result_preview, log_output],
         ).then(fn=lambda: "", outputs=[msg_input])
 
         result_selector.change(
-            fn=_on_result_select,
+            fn=on_result_select,
             inputs=[result_selector],
             outputs=[result_preview],
         )
 
         dl_btn.click(
-            fn=_download_all,
+            fn=download_all,
             outputs=[dl_btn],
         )
 
-    return app
-
-
-# モジュールレベルで demo を公開（gradio CLI のホットリロード用）
-demo = build_app()
-
-
-def launch_web_ui(port: int = 7860) -> None:
-    """Gradio WebUIを起動する"""
-    demo.queue()
-    demo.launch(server_port=port, share=False, theme=gr.themes.Soft())
+    app.queue()
+    app.launch(server_port=port, share=False, theme=gr.themes.Soft())
